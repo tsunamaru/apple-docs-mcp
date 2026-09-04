@@ -235,6 +235,13 @@ export const APPLE_URLS = {
   SAMPLE_CODE_INDEX_JSON: 'https://developer.apple.com/tutorials/data/index/samplecode',
 } as const;
 
+// Apple no longer renders results in the HTML returned by APPLE_URLS.SEARCH.
+// Keep the provider separate from the user-facing Apple search URL so its
+// redirects and markup never leak into tool responses.
+export const DOCUMENTATION_SEARCH_URLS = {
+  PROVIDER: 'https://html.duckduckgo.com/html/',
+} as const;
+
 // WWDC URLs
 export const WWDC_URLS = {
   BASE: 'https://developer.apple.com/videos',

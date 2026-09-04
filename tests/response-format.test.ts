@@ -24,6 +24,7 @@ import AppleDeveloperDocsMCPServer from '../src/index.js';
 jest.mock('../src/utils/http-client.js', () => ({
   httpClient: {
     getText: jest.fn().mockResolvedValue('<html><body><ul class="search-results"></ul></body></html>'),
+    getJson: jest.fn().mockResolvedValue({ interfaceLanguages: { swift: [] } }),
     get: jest.fn().mockResolvedValue({
       ok: true,
       json: jest.fn().mockResolvedValue({})
@@ -45,6 +46,10 @@ jest.mock('../src/utils/cache.js', () => ({
     get: jest.fn().mockReturnValue(null),
     set: jest.fn(),
     has: jest.fn().mockReturnValue(false)
+  },
+  indexCache: {
+    get: jest.fn().mockReturnValue(undefined),
+    set: jest.fn()
   },
   generateUrlCacheKey: jest.fn().mockReturnValue('test-cache-key')
 }));

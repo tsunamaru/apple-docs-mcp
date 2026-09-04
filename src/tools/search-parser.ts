@@ -1,8 +1,9 @@
 import * as cheerio from 'cheerio';
 import type { SearchResult } from './search-result-parser.js';
-import { parseSearchResult } from './search-result-parser.js';
+import { isResultTypeSupported, parseSearchResult } from './search-result-parser.js';
 import { API_LIMITS } from '../utils/constants.js';
 import { logger } from '../utils/logger.js';
+import { normalizeFrameworkName } from '../utils/framework-mapper.js';
 
 /**
  * Formats search results for display
@@ -44,6 +45,70 @@ export function formatSearchResults(
   content += formatSearchFooter(searchUrl);
 
   return content;
+}
+
+function normalizeRelevanceText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function getMergedResultRelevance(result: SearchResult, query: string): number {
+  const normalizedQuery = normalizeRelevanceText(query);
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  if (normalizeRelevanceText(result.title) === normalizedQuery) {
+    return 3;
+  }
+
+  try {
+    const pathLeaf = new URL(result.url).pathname.split('/').filter(Boolean).at(-1) ?? '';
+    if (normalizeRelevanceText(decodeURIComponent(pathLeaf)) === normalizedQuery) {
+      return 2;
+    }
+  } catch {
+    // Keep the provider's original order for malformed URLs.
+  }
+
+  return normalizeRelevanceText(result.title).startsWith(normalizedQuery) ? 1 : 0;
+}
+
+/**
+ * Merge provider results with deterministic index results. Provider ordering is
+ * retained within each relevance tier, while exact index matches can still
+ * move ahead of partial provider matches.
+ */
+export function mergeDocumentationSearchResults(
+  indexResults: SearchResult[],
+  providerResults: SearchResult[],
+  query: string,
+): SearchResult[] {
+  const uniqueResults = new Map<string, SearchResult>();
+
+  for (const result of [...providerResults, ...indexResults]) {
+    const existing = uniqueResults.get(result.url);
+    if (!existing) {
+      uniqueResults.set(result.url, result);
+      continue;
+    }
+
+    uniqueResults.set(result.url, {
+      ...existing,
+      description: existing.description || result.description,
+      framework: existing.framework ?? result.framework,
+      beta: existing.beta || result.beta,
+    });
+  }
+
+  return [...uniqueResults.values()]
+    .map((result, position) => ({
+      result,
+      position,
+      relevance: getMergedResultRelevance(result, query),
+    }))
+    .sort((a, b) => b.relevance - a.relevance || a.position - b.position)
+    .slice(0, API_LIMITS.MAX_SEARCH_RESULTS)
+    .map(({ result }) => result);
 }
 
 /**
@@ -230,4 +295,161 @@ export function parseSearchResults(
       }],
     };
   }
+}
+
+/**
+ * Decode a result URL returned by DuckDuckGo's HTML search endpoint.
+ *
+ * Results normally point at /l/?uddg=<encoded target>, but direct links are
+ * accepted as well. Only canonical HTTPS links on developer.apple.com are
+ * returned so a malformed search response cannot inject links.
+ */
+function extractAppleResultUrl(href: string | undefined): URL | null {
+  if (!href) {
+    return null;
+  }
+
+  try {
+    const searchResultUrl = new URL(href, 'https://html.duckduckgo.com');
+    const redirectTarget = searchResultUrl.searchParams.get('uddg');
+    const targetUrl = new URL(redirectTarget ?? searchResultUrl.href);
+
+    if (targetUrl.protocol !== 'https:' || targetUrl.hostname !== 'developer.apple.com') {
+      return null;
+    }
+
+    if (!targetUrl.pathname.startsWith('/documentation/') &&
+        !targetUrl.pathname.startsWith('/tutorials/')) {
+      return null;
+    }
+
+    targetUrl.hash = '';
+    targetUrl.search = '';
+    if (targetUrl.pathname.length > 1) {
+      targetUrl.pathname = targetUrl.pathname.replace(/\/+$/, '');
+    }
+    return targetUrl;
+  } catch {
+    return null;
+  }
+}
+
+function inferSearchResultType(url: URL, title: string, description: string): string {
+  const searchableText = `${title} ${description}`.toLowerCase();
+
+  if (url.pathname.startsWith('/tutorials/') || /\btutorial\b/.test(searchableText)) {
+    return 'documentation-tutorial';
+  }
+
+  if (url.pathname.startsWith('/documentation/samplecode') ||
+      /\bsample (?:code|project)\b/.test(searchableText)) {
+    return 'sample-code';
+  }
+
+  return 'documentation';
+}
+
+function extractFrameworkFromResultUrl(url: URL): string | undefined {
+  if (!url.pathname.startsWith('/documentation/')) {
+    return undefined;
+  }
+
+  const framework = url.pathname.split('/').filter(Boolean)[1];
+  return framework ? normalizeFrameworkName(decodeURIComponent(framework)) : undefined;
+}
+
+function cleanExternalResultTitle(title: string): string {
+  return title
+    .replace(/\s*[|-]\s*Apple Developer(?: Documentation)?\s*$/i, '')
+    .trim();
+}
+
+/**
+ * Parse a site-restricted web search into the legacy SearchResult model.
+ *
+ * Apple's /search/ response is now only a JavaScript shell, and its private
+ * client API is not available as a public JSON endpoint.
+ */
+export function isDocumentationWebSearchChallenge(html: string): boolean {
+  try {
+    const $ = cheerio.load(html);
+    return $('#challenge-form').length > 0 ||
+      $('.anomaly-modal').length > 0 ||
+      $('form[action*="/anomaly.js"]').length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export function extractDocumentationWebSearchResults(
+  html: string,
+  filterType: string = 'all',
+): SearchResult[] {
+  if (isDocumentationWebSearchChallenge(html)) {
+    throw new Error('Documentation search provider blocked the automated request');
+  }
+
+  try {
+    const $ = cheerio.load(html);
+    const results: SearchResult[] = [];
+    const seenUrls = new Set<string>();
+
+    $('.result').each((_, element) => {
+      if (results.length >= API_LIMITS.MAX_SEARCH_RESULTS) {
+        return false;
+      }
+
+      const resultElement = $(element);
+      const titleElement = resultElement.find('.result__a').first();
+      const url = extractAppleResultUrl(titleElement.attr('href'));
+      const title = cleanExternalResultTitle(titleElement.text());
+
+      if (!url || !title) {
+        return true;
+      }
+
+      const canonicalUrl = url.href;
+      if (seenUrls.has(canonicalUrl)) {
+        return true;
+      }
+
+      const description = resultElement.find('.result__snippet').first().text().trim();
+      const type = inferSearchResultType(url, title, description);
+      if (!isResultTypeSupported(type, filterType)) {
+        return true;
+      }
+
+      seenUrls.add(canonicalUrl);
+      results.push({
+        title,
+        url: canonicalUrl,
+        type,
+        description,
+        framework: extractFrameworkFromResultUrl(url),
+        beta: /\bbeta\b/i.test(`${title} ${description}`),
+      });
+
+      return true;
+    });
+
+    return results;
+  } catch (error) {
+    logger.error('Error parsing documentation web search results:', error);
+    return [];
+  }
+}
+
+export function parseDocumentationWebSearchResults(
+  html: string,
+  query: string,
+  searchUrl: string,
+  filterType: string = 'all',
+): { content: Array<{ type: string; text: string }> } {
+  const results = extractDocumentationWebSearchResults(html, filterType);
+  return {
+    content: [{
+      type: 'text',
+      text: formatSearchResults(results, query, filterType, searchUrl),
+    }],
+  };
 }

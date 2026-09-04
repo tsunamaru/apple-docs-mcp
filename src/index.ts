@@ -3,7 +3,13 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { parseSearchResults } from './tools/search-parser.js';
+import {
+  extractDocumentationWebSearchResults,
+  formatSearchResults,
+  mergeDocumentationSearchResults,
+} from './tools/search-parser.js';
+import type { SearchResult } from './tools/search-result-parser.js';
+import { searchDocumentationIndexes } from './tools/documentation-index-search.js';
 import { fetchAppleDocJson } from './tools/doc-fetcher.js';
 import { handleListTechnologies } from './tools/list-technologies.js';
 import { searchFrameworkSymbols } from './tools/search-framework-symbols.js';
@@ -16,7 +22,7 @@ import { handleFindSimilarApis } from './tools/find-similar-apis.js';
 import { handleGetDocumentationUpdates } from './tools/get-documentation-updates.js';
 import { handleGetTechnologyOverviews } from './tools/get-technology-overviews.js';
 import { handleGetSampleCode } from './tools/get-sample-code.js';
-import { APPLE_URLS } from './utils/constants.js';
+import { APPLE_URLS, DOCUMENTATION_SEARCH_URLS } from './utils/constants.js';
 import { isValidAppleDeveloperUrl } from './utils/url-converter.js';
 import { validateInput, ErrorType, createStandardErrorResponse, createToolErrorResponse } from './utils/error-handler.js';
 import { httpClient } from './utils/http-client.js';
@@ -117,14 +123,43 @@ export default class AppleDeveloperDocsMCPServer {
 
       // 创建 Apple Developer Documentation 搜索 URL
       const searchUrl = `${APPLE_URLS.SEARCH}?q=${encodeURIComponent(query)}`;
+      const scopedQuery = type === 'sample'
+        ? `site:developer.apple.com/documentation/ "sample code" ${query}`
+        : `site:developer.apple.com ${query}`;
+      const providerUrl = `${DOCUMENTATION_SEARCH_URLS.PROVIDER}?q=${encodeURIComponent(scopedQuery)}`;
 
       logger.info(`Searching Apple docs for: ${query}`);
 
-      // 获取搜索结果页面
-      const html = await httpClient.getText(searchUrl);
+      // Merge the provider's broad search with Apple's deterministic DocC
+      // indexes. A partial index hit must not suppress a better provider result.
+      const providerSearch: Promise<{ results: SearchResult[]; error?: unknown }> = httpClient
+        .getText(providerUrl)
+        .then(html => ({ results: extractDocumentationWebSearchResults(html, type) }))
+        .catch(error => ({ results: [], error }));
+      const [indexResults, providerOutcome] = await Promise.all([
+        searchDocumentationIndexes(query, type),
+        providerSearch,
+      ]);
 
-      // 解析并返回搜索结果，传递type参数进行过滤
-      return parseSearchResults(html, query, searchUrl, type);
+      if (providerOutcome.error) {
+        if (indexResults.length === 0) {
+          throw providerOutcome.error;
+        }
+        logger.warn('Documentation web search unavailable; using index results only:', providerOutcome.error);
+      }
+
+      const results = mergeDocumentationSearchResults(
+        indexResults,
+        providerOutcome.results,
+        query,
+      );
+
+      return {
+        content: [{
+          type: 'text',
+          text: formatSearchResults(results, query, type, searchUrl),
+        }],
+      };
     } catch (error) {
       if (error && typeof error === 'object' && 'type' in error) {
         return createToolErrorResponse(error as any, 'search_apple_docs');

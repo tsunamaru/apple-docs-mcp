@@ -195,7 +195,7 @@ describe('WWDC Handlers', () => {
       hasCode: true,
       hasResources: true,
       transcript: {
-        fullText: 'Welcome to Meet the Translation API\nToday we will explore async await patterns',
+        fullText: 'Welcome to Meet the Translation API\nToday we will explore async await patterns and NavigationStack',
         segments: [
           { timestamp: '00:00', text: 'Welcome to Meet the Translation API' },
           { timestamp: '00:30', text: 'Today we will explore async await patterns' },
@@ -263,6 +263,14 @@ describe('WWDC Handlers', () => {
       expect(result).toContain('Meet the Translation API');
       expect(result).toContain('async await patterns');
       expect(mockLoadVideoData).toHaveBeenCalled();
+    });
+
+    test('should find a documented API mentioned in a transcript', async () => {
+      const result = await handleSearchWWDCContent('NavigationStack', 'transcript');
+
+      expect(result).toContain('WWDC Content Search Results');
+      expect(result).toContain('NavigationStack');
+      expect(result).not.toContain('No transcript found');
     });
 
     test('should search in code examples', async () => {
