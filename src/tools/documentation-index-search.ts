@@ -29,6 +29,7 @@ const PREFIX_FRAMEWORKS: Array<[RegExp, string[]]> = [
   [/^ui[a-z]/i, ['uikit']],
   [/^ns[a-z]/i, ['foundation', 'appkit']],
   [/^av[a-z]/i, ['avfoundation', 'avfaudio']],
+  [/^mtl[a-z]/i, ['metal']],
   [/^cg[a-z]/i, ['coregraphics']],
   [/^ca[a-z]/i, ['quartzcore']],
   [/^mk[a-z]/i, ['mapkit']],

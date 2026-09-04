@@ -67,6 +67,16 @@ function mockIndexResponse(url: string) {
     ]);
   }
 
+  if (url.endsWith('/metal')) {
+    return indexWith([
+      {
+        path: '/documentation/metal/mtlrendercommandencoder',
+        title: 'MTLRenderCommandEncoder',
+        type: 'protocol',
+      },
+    ]);
+  }
+
   if (url.endsWith('/observation')) {
     return indexWith([
       {
@@ -141,6 +151,18 @@ describe('searchDocumentationIndexes', () => {
     expect(results[0]).toMatchObject({
       title: 'UIViewController',
       url: 'https://developer.apple.com/documentation/uikit/uiviewcontroller',
+    });
+  });
+
+  it('finds Metal APIs by their MTL prefix without a provider result', async () => {
+    const results = await searchDocumentationIndexes('MTLRenderCommandEncoder');
+
+    expect(mockGetJson).toHaveBeenCalledWith(
+      'https://developer.apple.com/tutorials/data/index/metal',
+    );
+    expect(results[0]).toMatchObject({
+      title: 'MTLRenderCommandEncoder',
+      url: 'https://developer.apple.com/documentation/metal/mtlrendercommandencoder',
     });
   });
 
