@@ -58,17 +58,19 @@ describe('HTTP Client Headers Integration', () => {
       expect(typeof options.headers['Accept-Language']).toBe('string');
     });
 
-    test('should allow custom headers to override generated ones', async () => {
+    test('should allow custom headers and redirect policy overrides', async () => {
       await httpClient.getJson('https://example.com/api', {
         headers: {
           'User-Agent': 'Custom-Agent/1.0',
           'Custom-Header': 'custom-value',
         },
+        redirect: 'error',
       });
 
       const [, options] = mockFetch.mock.calls[0];
       expect(options.headers['User-Agent']).toBe('Custom-Agent/1.0');
       expect(options.headers['Custom-Header']).toBe('custom-value');
+      expect(options.redirect).toBe('error');
     });
   });
 
@@ -88,6 +90,29 @@ describe('HTTP Client Headers Integration', () => {
       const [, options] = mockFetch.mock.calls[0];
       expect(options.headers).toHaveProperty('User-Agent');
       expect(typeof options.headers['User-Agent']).toBe('string');
+    });
+  });
+
+  describe('postText with generated headers', () => {
+    test('should send the request body and custom JSONL headers', async () => {
+      const body = JSON.stringify({ text: 'UIView' });
+
+      const result = await httpClient.postText('https://example.com/search', body, {
+        headers: {
+          'Accept': 'application/jsonl',
+          'Content-Type': 'application/json',
+        },
+      });
+
+      expect(result).toBe('success');
+      const [url, options] = mockFetch.mock.calls[0];
+      expect(url).toBe('https://example.com/search');
+      expect(options).toMatchObject({
+        method: 'POST',
+        body,
+      });
+      expect(options.headers['Accept']).toBe('application/jsonl');
+      expect(options.headers['Content-Type']).toBe('application/json');
     });
   });
 

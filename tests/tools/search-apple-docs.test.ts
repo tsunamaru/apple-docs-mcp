@@ -9,10 +9,9 @@ jest.mock('../../src/tools/documentation-index-search.js', () => ({
   searchDocumentationIndexes: jest.fn(),
 }));
 
-jest.mock('../../src/utils/http-client.js', () => ({
-  httpClient: {
-    getText: jest.fn(),
-  },
+jest.mock('../../src/tools/documentation-search-providers.js', () => ({
+  searchAppleDocumentationProvider: jest.fn(),
+  searchSearxDocumentationProvider: jest.fn(),
 }));
 
 jest.mock('../../src/utils/logger.js', () => ({
@@ -25,22 +24,30 @@ jest.mock('../../src/utils/logger.js', () => ({
 
 import AppleDeveloperDocsMCPServer from '../../src/index.js';
 import { searchDocumentationIndexes } from '../../src/tools/documentation-index-search.js';
-import { httpClient } from '../../src/utils/http-client.js';
+import {
+  searchAppleDocumentationProvider,
+  searchSearxDocumentationProvider,
+} from '../../src/tools/documentation-search-providers.js';
 
 const mockSearchIndexes = searchDocumentationIndexes as jest.MockedFunction<
   typeof searchDocumentationIndexes
 >;
-const mockGetText = httpClient.getText as jest.MockedFunction<typeof httpClient.getText>;
+const mockSearchApple = searchAppleDocumentationProvider as jest.MockedFunction<
+  typeof searchAppleDocumentationProvider
+>;
+const mockSearchSearx = searchSearxDocumentationProvider as jest.MockedFunction<
+  typeof searchSearxDocumentationProvider
+>;
 
-function providerResultHtml(title: string, path: string, description: string = ''): string {
-  return `
-    <div class="result">
-      <a class="result__a" href="https://developer.apple.com${path}">
-        ${title} | Apple Developer Documentation
-      </a>
-      <a class="result__snippet">${description}</a>
-    </div>
-  `;
+function documentationResult(title: string, framework: string, path: string) {
+  return {
+    title,
+    url: `https://developer.apple.com/documentation/${path}`,
+    type: 'documentation',
+    description: '',
+    framework,
+    beta: false,
+  };
 }
 
 describe('AppleDeveloperDocsMCPServer.searchAppleDocs', () => {
@@ -49,81 +56,100 @@ describe('AppleDeveloperDocsMCPServer.searchAppleDocs', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSearchIndexes.mockResolvedValue([]);
-    mockGetText.mockResolvedValue('<html><body class="no-results"></body></html>');
+    mockSearchApple.mockResolvedValue([]);
+    mockSearchSearx.mockResolvedValue([]);
     server = new AppleDeveloperDocsMCPServer();
   });
 
-  it('merges provider results even when a partial index result exists', async () => {
+  it('returns an exact DocC index match without calling external providers', async () => {
     mockSearchIndexes.mockResolvedValue([
+      documentationResult(
+        'MTLRenderCommandEncoder',
+        'Metal',
+        'metal/mtlrendercommandencoder',
+      ),
+    ]);
+
+    const response = await server.searchAppleDocs('MTLRenderCommandEncoder');
+
+    expect(mockSearchApple).not.toHaveBeenCalled();
+    expect(mockSearchSearx).not.toHaveBeenCalled();
+    expect(response.content[0].text).toContain('### 1. MTLRenderCommandEncoder');
+  });
+
+  it('merges Apple results with partial index matches and skips SearX', async () => {
+    mockSearchIndexes.mockResolvedValue([
+      documentationResult(
+        'UIViewControllerRepresentable',
+        'SwiftUI',
+        'swiftui/uiviewcontrollerrepresentable',
+      ),
+    ]);
+    mockSearchApple.mockResolvedValue([
       {
-        title: 'UIViewControllerRepresentable',
-        url: 'https://developer.apple.com/documentation/swiftui/uiviewcontrollerrepresentable',
-        type: 'documentation',
-        description: '',
+        ...documentationResult('UIViewController', 'UIKit', 'uikit/uiviewcontroller'),
+        description: 'Manages a UIKit view hierarchy.',
       },
     ]);
-    mockGetText.mockResolvedValue(providerResultHtml(
-      'UIViewController',
-      '/documentation/uikit/uiviewcontroller',
-      'Manages a UIKit view hierarchy.',
-    ));
 
     const response = await server.searchAppleDocs('uiviewcontroller');
     const text = response.content[0].text;
 
-    expect(mockGetText).toHaveBeenCalledTimes(1);
+    expect(mockSearchApple).toHaveBeenCalledWith('uiviewcontroller', 'all');
+    expect(mockSearchSearx).not.toHaveBeenCalled();
     expect(text).toContain('**Results found:** 2');
     expect(text.indexOf('### 1. UIViewController\n')).toBeLessThan(
       text.indexOf('### 2. UIViewControllerRepresentable\n'),
     );
   });
 
-  it('returns an error when the provider challenge leaves no index fallback', async () => {
-    mockGetText.mockResolvedValue(`
-      <form id="challenge-form" action="//duckduckgo.com/anomaly.js">
-        <div class="anomaly-modal">Unfortunately, bots use DuckDuckGo too.</div>
-      </form>
-    `);
+  it('uses SearX only when Apple returns no results', async () => {
+    mockSearchSearx.mockResolvedValue([
+      documentationResult('SKScene', 'SpriteKit', 'spritekit/skscene'),
+    ]);
 
     const response = await server.searchAppleDocs('SKScene');
 
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain(
-      'Documentation search provider blocked the automated request',
-    );
+    expect(mockSearchApple).toHaveBeenCalledTimes(1);
+    expect(mockSearchSearx).toHaveBeenCalledWith('SKScene', 'all');
+    expect(response.content[0].text).toContain('### 1. SKScene');
   });
 
-  it('uses deterministic index results when the provider is challenged', async () => {
-    mockSearchIndexes.mockResolvedValue([
-      {
-        title: 'UIViewController',
-        url: 'https://developer.apple.com/documentation/uikit/uiviewcontroller',
-        type: 'documentation',
-        description: '',
-      },
+  it('uses SearX after an Apple provider failure', async () => {
+    mockSearchApple.mockRejectedValue(new Error('Apple unavailable'));
+    mockSearchSearx.mockResolvedValue([
+      documentationResult('SKScene', 'SpriteKit', 'spritekit/skscene'),
     ]);
-    mockGetText.mockResolvedValue('<form id="challenge-form"></form>');
 
-    const response = await server.searchAppleDocs('UIViewController');
+    const response = await server.searchAppleDocs('SKScene');
+
+    expect(mockSearchSearx).toHaveBeenCalledTimes(1);
+    expect(response.isError).toBeUndefined();
+    expect(response.content[0].text).toContain('SKScene');
+  });
+
+  it('keeps partial index results when both external providers fail', async () => {
+    mockSearchIndexes.mockResolvedValue([
+      documentationResult('CameraView', 'HomeKit', 'homekit/cameraview'),
+    ]);
+    mockSearchApple.mockRejectedValue(new Error('Apple unavailable'));
+    mockSearchSearx.mockRejectedValue(new Error('SearX unavailable'));
+
+    const response = await server.searchAppleDocs('camera');
 
     expect(response.isError).toBeUndefined();
-    expect(response.content[0].text).toContain('### 1. UIViewController');
+    expect(response.content[0].text).toContain('CameraView');
   });
 
-  it('does not exclude tutorial paths from the provider query', async () => {
-    mockGetText.mockResolvedValue(providerResultHtml(
-      'Develop in Swift',
-      '/tutorials/develop-in-swift',
-      'A collection of tutorials for learning Swift.',
-    ));
+  it('returns an error when every search source is unavailable', async () => {
+    mockSearchApple.mockRejectedValue(new Error('Apple unavailable'));
+    mockSearchSearx.mockRejectedValue(new Error('SearX unavailable'));
 
-    const response = await server.searchAppleDocs('Develop in Swift');
-    const requestedUrl = mockGetText.mock.calls[0][0];
+    const response = await server.searchAppleDocs('UnknownSymbol');
 
-    expect(decodeURIComponent(requestedUrl)).toContain(
-      'site:developer.apple.com Develop in Swift',
-    );
-    expect(response.content[0].text).toContain('Develop in Swift');
-    expect(response.content[0].text).toContain('📖 Tutorials');
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('Documentation search providers unavailable');
+    expect(response.content[0].text).toContain('Apple unavailable');
+    expect(response.content[0].text).toContain('SearX unavailable');
   });
 });

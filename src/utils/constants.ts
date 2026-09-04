@@ -235,11 +235,19 @@ export const APPLE_URLS = {
   SAMPLE_CODE_INDEX_JSON: 'https://developer.apple.com/tutorials/data/index/samplecode',
 } as const;
 
-// Apple no longer renders results in the HTML returned by APPLE_URLS.SEARCH.
-// Keep the provider separate from the user-facing Apple search URL so its
-// redirects and markup never leak into tool responses.
+// Apple renders search results through a JSONL backend rather than embedding
+// them in APPLE_URLS.SEARCH. SearXNG is a last-resort fallback discovered from
+// the public searx.space instance directory.
 export const DOCUMENTATION_SEARCH_URLS = {
-  PROVIDER: 'https://html.duckduckgo.com/html/',
+  APPLE_PROVIDER: 'https://devintserv.msc.sbz.apple.com/api/v1/query',
+  SEARX_INSTANCES: 'https://searx.space/data/instances.json',
+} as const;
+
+export const DOCUMENTATION_SEARCH_CONFIG = {
+  APPLE_PROVIDER_TIMEOUT: 30000,
+  SEARX_DIRECTORY_TIMEOUT: 10000,
+  SEARX_INSTANCE_TIMEOUT: 5000,
+  SEARX_MAX_INSTANCE_ATTEMPTS: 3,
 } as const;
 
 // WWDC URLs
