@@ -100,6 +100,11 @@ jest.mock('../src/tools/doc-fetcher.js', () => ({
   })
 }));
 
+jest.mock('../src/tools/documentation-search-providers.js', () => ({
+  searchAppleDocumentationProvider: jest.fn().mockResolvedValue([]),
+  searchSearxDocumentationProvider: jest.fn().mockResolvedValue([])
+}));
+
 describe('Response Format Validation', () => {
   let server: AppleDeveloperDocsMCPServer;
 
@@ -220,12 +225,14 @@ describe('Response Format Validation', () => {
     });
 
     it('should handle network errors with proper format', async () => {
-      // Mock network failure
-      const { httpClient } = await import('../src/utils/http-client.js');
-      (httpClient.getText as jest.Mock).mockRejectedValueOnce(new Error('Network error'));
+      const providers = await import('../src/tools/documentation-search-providers.js');
+      (providers.searchAppleDocumentationProvider as jest.Mock)
+        .mockRejectedValueOnce(new Error('Apple network error'));
+      (providers.searchSearxDocumentationProvider as jest.Mock)
+        .mockRejectedValueOnce(new Error('SearX network error'));
 
       const response = await server.searchAppleDocs('SwiftUI', 'all');
-      
+
       validateResponseFormat(response);
       expect(response.isError).toBe(true);
     });

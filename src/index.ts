@@ -4,12 +4,16 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import {
-  extractDocumentationWebSearchResults,
   formatSearchResults,
+  hasExactDocumentationSearchResult,
   mergeDocumentationSearchResults,
 } from './tools/search-parser.js';
-import type { SearchResult } from './tools/search-result-parser.js';
 import { searchDocumentationIndexes } from './tools/documentation-index-search.js';
+import type { SearchResult } from './tools/search-result-parser.js';
+import {
+  searchAppleDocumentationProvider,
+  searchSearxDocumentationProvider,
+} from './tools/documentation-search-providers.js';
 import { fetchAppleDocJson } from './tools/doc-fetcher.js';
 import { handleListTechnologies } from './tools/list-technologies.js';
 import { searchFrameworkSymbols } from './tools/search-framework-symbols.js';
@@ -22,14 +26,24 @@ import { handleFindSimilarApis } from './tools/find-similar-apis.js';
 import { handleGetDocumentationUpdates } from './tools/get-documentation-updates.js';
 import { handleGetTechnologyOverviews } from './tools/get-technology-overviews.js';
 import { handleGetSampleCode } from './tools/get-sample-code.js';
-import { APPLE_URLS, DOCUMENTATION_SEARCH_URLS } from './utils/constants.js';
+import { APPLE_URLS } from './utils/constants.js';
 import { isValidAppleDeveloperUrl } from './utils/url-converter.js';
 import { validateInput, ErrorType, createStandardErrorResponse, createToolErrorResponse } from './utils/error-handler.js';
-import { httpClient } from './utils/http-client.js';
 import { preloadPopularFrameworks } from './utils/preloader.js';
 import { warmUpCaches, schedulePeriodicCacheRefresh } from './utils/cache-warmer.js';
 import { logger } from './utils/logger.js';
 import { API_LIMITS } from './utils/constants.js';
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (error && typeof error === 'object' && 'message' in error &&
+      typeof error.message === 'string') {
+    return error.message;
+  }
+  return String(error);
+}
 
 export default class AppleDeveloperDocsMCPServer {
   private server: Server;
@@ -123,36 +137,55 @@ export default class AppleDeveloperDocsMCPServer {
 
       // 创建 Apple Developer Documentation 搜索 URL
       const searchUrl = `${APPLE_URLS.SEARCH}?q=${encodeURIComponent(query)}`;
-      const scopedQuery = type === 'sample'
-        ? `site:developer.apple.com/documentation/ "sample code" ${query}`
-        : `site:developer.apple.com ${query}`;
-      const providerUrl = `${DOCUMENTATION_SEARCH_URLS.PROVIDER}?q=${encodeURIComponent(scopedQuery)}`;
 
       logger.info(`Searching Apple docs for: ${query}`);
 
-      // Merge the provider's broad search with Apple's deterministic DocC
-      // indexes. A partial index hit must not suppress a better provider result.
-      const providerSearch: Promise<{ results: SearchResult[]; error?: unknown }> = httpClient
-        .getText(providerUrl)
-        .then(html => ({ results: extractDocumentationWebSearchResults(html, type) }))
-        .catch(error => ({ results: [], error }));
-      const [indexResults, providerOutcome] = await Promise.all([
-        searchDocumentationIndexes(query, type),
-        providerSearch,
-      ]);
-
-      if (providerOutcome.error) {
-        if (indexResults.length === 0) {
-          throw providerOutcome.error;
-        }
-        logger.warn('Documentation web search unavailable; using index results only:', providerOutcome.error);
+      // Exact DocC matches need no external provider. Broader queries use
+      // Apple's search backend, then a healthy public SearXNG instance only as
+      // a final fallback. Index results remain available if both providers fail.
+      const indexResults = await searchDocumentationIndexes(query, type);
+      if (hasExactDocumentationSearchResult(indexResults, query)) {
+        return {
+          content: [{
+            type: 'text',
+            text: formatSearchResults(indexResults, query, type, searchUrl),
+          }],
+        };
       }
 
-      const results = mergeDocumentationSearchResults(
-        indexResults,
-        providerOutcome.results,
-        query,
-      );
+      let appleResults: SearchResult[] = [];
+      let appleError: unknown;
+      let appleSucceeded = false;
+      try {
+        appleResults = await searchAppleDocumentationProvider(query, type);
+        appleSucceeded = true;
+      } catch (error) {
+        appleError = error;
+        logger.warn('Apple documentation search provider unavailable:', error);
+      }
+
+      let searxResults: SearchResult[] = [];
+      let searxError: unknown;
+      let searxSucceeded = false;
+      if (appleResults.length === 0) {
+        try {
+          searxResults = await searchSearxDocumentationProvider(query, type);
+          searxSucceeded = true;
+        } catch (error) {
+          searxError = error;
+          logger.warn('SearX documentation search fallback unavailable:', error);
+        }
+      }
+
+      const providerResults = appleResults.length > 0 ? appleResults : searxResults;
+      const results = mergeDocumentationSearchResults(indexResults, providerResults, query);
+      if (results.length === 0 && !appleSucceeded && !searxSucceeded) {
+        const appleReason = getErrorMessage(appleError);
+        const searxReason = getErrorMessage(searxError);
+        throw new Error(
+          `Documentation search providers unavailable (Apple: ${appleReason}; SearX: ${searxReason})`,
+        );
+      }
 
       return {
         content: [{

@@ -53,6 +53,7 @@ describe('HTTP Client User-Agent Integration', () => {
       expect(typeof httpClient.get).toBe('function');
       expect(typeof httpClient.getJson).toBe('function');
       expect(typeof httpClient.getText).toBe('function');
+      expect(typeof httpClient.postText).toBe('function');
       expect(typeof httpClient.getStatus).toBe('function');
       expect(typeof httpClient.getPerformanceStats).toBe('function');
       expect(typeof httpClient.resetStats).toBe('function');

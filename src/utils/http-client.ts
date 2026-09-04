@@ -35,6 +35,8 @@ interface RequestOptions {
   retryDelay?: number;
   /** Additional headers to include in the request */
   headers?: Record<string, string>;
+  /** Redirect policy for the underlying fetch request */
+  redirect?: RequestRedirect;
 }
 
 /**
@@ -142,6 +144,7 @@ class HttpClient {
       retries = REQUEST_CONFIG.MAX_RETRIES,
       retryDelay = REQUEST_CONFIG.RETRY_DELAY,
       headers = {},
+      redirect = 'follow',
     } = options;
 
     return this.executeWithQueue(async () => {
@@ -156,6 +159,7 @@ class HttpClient {
       return this.fetchWithRetry(url, {
         method: 'GET',
         headers: requestHeaders,
+        redirect,
         signal: AbortSignal.timeout(timeout),
       }, retries, retryDelay);
     });
@@ -389,6 +393,7 @@ class HttpClient {
       retries = REQUEST_CONFIG.MAX_RETRIES,
       retryDelay = REQUEST_CONFIG.RETRY_DELAY,
       headers = {},
+      redirect = 'follow',
     } = options;
 
     try {
@@ -407,6 +412,42 @@ class HttpClient {
         const response = await this.fetchWithRetry(url, {
           method: 'GET',
           headers: requestHeaders,
+          redirect,
+          signal: AbortSignal.timeout(timeout),
+        }, retries, retryDelay);
+
+        return await response.text();
+      });
+    } catch (error) {
+      const appError = handleFetchError(error, url);
+      throw appError;
+    }
+  }
+
+  /**
+   * POST a request body and return the response as text.
+   */
+  async postText(url: string, body: string, options: RequestOptions = {}): Promise<string> {
+    const {
+      timeout = REQUEST_CONFIG.TIMEOUT,
+      retries = REQUEST_CONFIG.MAX_RETRIES,
+      retryDelay = REQUEST_CONFIG.RETRY_DELAY,
+      headers = {},
+      redirect = 'follow',
+    } = options;
+
+    try {
+      return this.executeWithQueue(async () => {
+        if (!globalRateLimiter.canMakeRequest()) {
+          throw new Error('Rate limit exceeded. Please try again later.');
+        }
+
+        const requestHeaders = await this.generateRequestHeaders(headers, 'application/json');
+        const response = await this.fetchWithRetry(url, {
+          method: 'POST',
+          headers: requestHeaders,
+          body,
+          redirect,
           signal: AbortSignal.timeout(timeout),
         }, retries, retryDelay);
 
